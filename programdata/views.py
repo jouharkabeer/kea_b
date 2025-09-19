@@ -229,29 +229,39 @@ class ScanQRForEventCheckInAPIView(APIView):
         qr_data = request.data.get('qr_data')  
         event_id = request.data.get('event_id')  
         
+        logger.info(f"QR Scan request - QR Data: {qr_data[:50] if qr_data else 'None'}..., Event ID: {event_id}")
+        
         if not event_id:
             return Response({
                 'status': 'error',
                 'message': 'Event ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Extract user_id from QR data
+        if not qr_data:
+            return Response({
+                'status': 'error',
+                'message': 'QR data is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+    
         user_id = None
         
-        if qr_data:
-            # Check if this is a secure encrypted QR code
+        try:
+          
             if qr_data.startswith('KEA_SECURE:'):
-                # Extract the JWT token
+                logger.info("Processing secure encrypted QR code")
+                
+             
                 jwt_token = qr_data[len('KEA_SECURE:'):]
                 
-                # Get the JWT secret key from settings
+             
                 jwt_secret = getattr(settings, "QR_JWT_SECRET", "your-jwt-secret-for-qr-codes")
                 
                 try:
-                    # Decode and verify the JWT token
+                   
                     payload = jwt.decode(jwt_token, jwt_secret, algorithms=['HS256'])
                     
-                    # Extract the encrypted data
+                
                     encrypted_b64 = payload.get('data')
                     
                     if not encrypted_b64:
@@ -260,14 +270,14 @@ class ScanQRForEventCheckInAPIView(APIView):
                             'message': 'Invalid QR code format: Missing data'
                         }, status=status.HTTP_400_BAD_REQUEST)
                     
-                    # Get encryption key from settings
+                   
                     encryption_key = getattr(settings, "QR_ENCRYPTION_KEY", "your-encryption-key-for-qr-codes")
                     
                     try:
-                        # Decrypt the data
+                    
                         user_data = decrypt_qr_data(encrypted_b64, encryption_key)
                         
-                        # Extract the user_id
+                      
                         user_id = user_data.get('user_id')
                         
                         if not user_id:
@@ -276,7 +286,7 @@ class ScanQRForEventCheckInAPIView(APIView):
                                 'message': 'Invalid QR code: No user ID found in decrypted data'
                             }, status=status.HTTP_400_BAD_REQUEST)
                         
-                        # Log the successful decryption
+                
                         logger.info(f"Encrypted QR code decrypted successfully. User ID: {user_id}")
                         
                     except Exception as e:
@@ -291,100 +301,169 @@ class ScanQRForEventCheckInAPIView(APIView):
                         'status': 'error',
                         'message': 'QR code has expired. Please request a new membership card.'
                     }, status=status.HTTP_400_BAD_REQUEST)
+                    
                 except jwt.InvalidTokenError as e:
-                    logger.error(f"JWT token verification failed: {str(e)}")
+                    logger.error(f"JWT decoding error: {str(e)}")
                     return Response({
                         'status': 'error',
-                        'message': 'Invalid QR code. Unable to verify authenticity.'
+                        'message': 'Invalid QR code format.'
                     }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Handle other formats (for backward compatibility)
-            elif qr_data.startswith('KEA_QR|'):
-                parsed_data = {}
-                parts = qr_data.split('|')
+       
+            else:
+                logger.info("Processing plain QR code")
                 
-                for part in parts[1:]:  # Skip the KEA_QR prefix
-                    if '=' in part:
-                        key, value = part.split('=', 1)
-                        parsed_data[key] = value
+           
+                parsed_data = parse_qr_code_data(qr_data)
                 
-                user_id = parsed_data.get('USER_ID')
+                if parsed_data and 'USER_ID' in parsed_data:
+                    user_id = parsed_data['USER_ID']
+                elif parsed_data and 'ID' in parsed_data:
+                    user_id = parsed_data['ID']
+                else:
+                 
+                    if qr_data.startswith('USER_ID:'):
+                        user_id = qr_data.split('USER_ID:')[1].split('|')[0].strip()
+                    elif '=' in qr_data and 'user_id' in qr_data.lower():
+                 
+                        parts = qr_data.split('&')
+                        for part in parts:
+                            if part.lower().startswith('user_id='):
+                                user_id = part.split('=')[1].strip()
+                                break
+                    else:
+                      
+                        import re
+                        if re.match(r'^[a-fA-F0-9\-]{8,}$', qr_data.strip()):
+                            user_id = qr_data.strip()
+                        elif re.match(r'^[a-zA-Z0-9_\-]+$', qr_data.strip()):
+                            user_id = qr_data.strip()
                 
                 if not user_id:
+                    logger.warning(f"Could not extract user_id from QR data: {qr_data}")
                     return Response({
                         'status': 'error',
-                        'message': 'Invalid QR code format: No user ID found'
+                        'message': f'Invalid QR code format. Could not extract user ID from: {qr_data[:50]}...'
                     }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Handle USER_ID format
-            elif 'USER_ID:' in qr_data:
-                parts = qr_data.split('USER_ID:')
-                if len(parts) > 1:
-                    user_id = parts[1].strip().split()[0]  # Get first word after USER_ID:
-            
-            # Check for UUID format
-            elif re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', qr_data.strip(), re.IGNORECASE):
-                user_id = qr_data.strip()
-            
-            # Handle direct input (could be just the user_id)
-            else:
-                user_id = qr_data.strip()
-        
-        if not user_id:
+                
+                logger.info(f"Extracted user ID from plain QR: {user_id}")
+
+        except Exception as e:
+            logger.error(f"Error parsing QR data: {str(e)}")
             return Response({
                 'status': 'error',
-                'message': 'User ID is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Rest of your existing code to verify the user and event registration
+                'message': 'Error processing QR code data'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+  
         try:
-            # Get the user from QR scan
-            user = CustomUser.objects.get(user_id=user_id)
-            
-            # Check if user's membership is valid
-            if not user.is_active:
-                return Response({
-                    'status': 'membership_inactive',
-                    'message': f'{user.username} has an inactive membership',
-                    'user_info': {
-                        'username': user.username,
-                        'email': user.email,
-                        'phone_number': user.phone_number,
-                        'membership_expiry': user.membership_expiry,
-                        'is_active': user.is_active
-                    }
-                }, status=status.HTTP_200_OK)
-            
-            # Check membership expiry
-            if user.membership_expiry and user.membership_expiry <= timezone.now():
-                return Response({
-                    'status': 'membership_expired',
-                    'message': f'{user.username} membership has expired',
-                    'user_info': {
-                        'username': user.username,
-                        'email': user.email,
-                        'phone_number': user.phone_number,
-                        'membership_expiry': user.membership_expiry,
-                        'is_active': user.is_active
-                    }
-                }, status=status.HTTP_200_OK)
-            
-            # Get the event
+      
             try:
                 event = Event.objects.get(event_id=event_id)
             except Event.DoesNotExist:
                 return Response({
-                    'status': 'event_not_found',
+                    'status': 'error',
                     'message': 'Event not found'
                 }, status=status.HTTP_404_NOT_FOUND)
+
+         
+            user = None
             
-            # Check if user is registered for this event
+        
+            try:
+                user = CustomUser.objects.get(user_id=user_id)
+            except CustomUser.DoesNotExist:
+         
+                try:
+                    user = CustomUser.objects.get(kea_id=user_id)
+                except CustomUser.DoesNotExist:
+                  
+                    try:
+                        user = CustomUser.objects.get(username=user_id)
+                    except CustomUser.DoesNotExist:
+                        logger.warning(f"User not found with ID: {user_id}")
+                        return Response({
+                            'status': 'user_not_found',
+                            'message': f'User not found with ID: {user_id}'
+                        }, status=status.HTTP_404_NOT_FOUND)
+            
+            logger.info(f"Found user: {user.username} (ID: {user.user_id})")
+
+       
+            if not user.is_active:
+                return Response({
+                    'status': 'membership_inactive',
+                    'message': 'User membership is inactive',
+                    'user_info': {
+                        'username': user.username,
+                        'email': user.email,
+                        'phone_number': user.phone_number,
+                        'user_type': user.user_type,
+                        'is_active': user.is_active
+                    }
+                }, status=status.HTTP_200_OK)
+
+         
             try:
                 registration = EventRegistration.objects.get(
-                    event=event,
                     registered_by=user,
+                    event=event,
                     is_active=True
                 )
+                
+               
+                if hasattr(registration, 'checked_in') and registration.checked_in:
+                    return Response({
+                        'status': 'already_checked_in',
+                        'message': f'{user.username} is already checked in for this event',
+                        'user_info': {
+                            'username': user.username,
+                            'email': user.email,
+                            'phone_number': user.phone_number,
+                            'company_name': getattr(user, 'company_name', ''),
+                            'designation': getattr(user, 'designation', ''),
+                            'user_type': user.user_type,
+                            'kea_id': getattr(user, 'kea_id', ''),
+                            'fee_paid': registration.fee_paid,
+                            'registered_on': registration.registered_on,
+                            'profile_picture': user.profile_picture.url if user.profile_picture else None
+                        },
+                        'event_info': {
+                            'event_name': event.event_name,
+                            'event_sub_name': event.event_sub_name,
+                            'event_time': event.event_time,
+                            'location': event.location,
+                            'description': event.description
+                        },
+                        'registration_id': str(registration.event_registration_id)
+                    }, status=status.HTTP_200_OK)
+                
+                # User is registered and ready for check-in
+                return Response({
+                    'status': 'ready_for_checkin',
+                    'message': f'{user.username} is registered and ready for check-in',
+                    'user_info': {
+                        'username': user.username,
+                        'email': user.email,
+                        'phone_number': user.phone_number,
+                        'company_name': getattr(user, 'company_name', ''),
+                        'designation': getattr(user, 'designation', ''),
+                        'user_type': user.user_type,
+                        'kea_id': getattr(user, 'kea_id', ''),
+                        'fee_paid': registration.fee_paid,
+                        'registered_on': registration.registered_on,
+                        'profile_picture': user.profile_picture.url if user.profile_picture else None
+                    },
+                    'event_info': {
+                        'event_name': event.event_name,
+                        'event_sub_name': event.event_sub_name,
+                        'event_time': event.event_time,
+                        'location': event.location,
+                        'description': event.description
+                    },
+                    'registration_id': str(registration.event_registration_id)
+                }, status=status.HTTP_200_OK)
+                
             except EventRegistration.DoesNotExist:
                 return Response({
                     'status': 'not_registered',
@@ -393,10 +472,9 @@ class ScanQRForEventCheckInAPIView(APIView):
                         'username': user.username,
                         'email': user.email,
                         'phone_number': user.phone_number,
-                        'company_name': user.company_name,
-                        'designation': user.designation,
+                        'company_name': getattr(user, 'company_name', ''),
                         'user_type': user.user_type,
-                        'membership_expiry': user.membership_expiry
+                        'kea_id': getattr(user, 'kea_id', '')
                     },
                     'event_info': {
                         'event_name': event.event_name,
@@ -405,67 +483,264 @@ class ScanQRForEventCheckInAPIView(APIView):
                         'location': event.location
                     }
                 }, status=status.HTTP_200_OK)
-            
-            # Check if already checked in
-            if hasattr(registration, 'checked_in') and registration.checked_in:
-                return Response({
-                    'status': 'already_checked_in',
-                    'message': f'{user.username} is already checked in',
-                    'checked_in_at': getattr(registration, 'checked_in_at', None),
-                    'user_info': {
-                        'username': user.username,
-                        'email': user.email,
-                        'phone_number': user.phone_number,
-                        'company_name': user.company_name,
-                        'designation': user.designation,
-                        'user_type': user.user_type,
-                        'fee_paid': registration.fee_paid
-                    },
-                    'event_info': {
-                        'event_name': event.event_name,
-                        'event_sub_name': event.event_sub_name,
-                        'location': event.location
-                    }
-                }, status=status.HTTP_200_OK)
-            
-            # Success - User is registered and ready for check-in
-            return Response({
-                'status': 'ready_for_checkin',
-                'message': f'{user.username} is registered and ready for check-in',
-                'user_info': {
-                    'username': user.username,
-                    'email': user.email,
-                    'phone_number': user.phone_number,
-                    'company_name': user.company_name,
-                    'designation': user.designation,
-                    'department_of_study': user.department_of_study,
-                    'year_of_graduation': user.year_of_graduation,
-                    'user_type': user.user_type,
-                    'fee_paid': registration.fee_paid,
-                    'registered_on': registration.registered_on,
-                    'profile_picture': user.profile_picture.url if user.profile_picture else None
-                },
-                'event_info': {
-                    'event_name': event.event_name,
-                    'event_sub_name': event.event_sub_name,
-                    'event_time': event.event_time,
-                    'location': event.location,
-                    'description': event.description
-                },
-                'registration_id': str(registration.event_registration_id)
-            }, status=status.HTTP_200_OK)
-            
-        except CustomUser.DoesNotExist:
-            return Response({
-                'status': 'user_not_found',
-                'message': 'User not found'
-            }, status=status.HTTP_404_NOT_FOUND)
+                
         except Exception as e:
             logger.error(f"Error processing event check-in: {str(e)}")
             return Response({
                 'status': 'error',
                 'message': f'An error occurred: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# class ScanQRForEventCheckInAPIView(APIView):
+#     """
+#     Scan user's QR code and verify event registration
+#     Admin scans the QR code to check if user is registered for a specific event
+#     """
+#     permission_classes = [IsAdminUser]
+    
+#     def post(self, request):
+#         qr_data = request.data.get('qr_data')  
+#         event_id = request.data.get('event_id')  
+        
+#         if not event_id:
+#             return Response({
+#                 'status': 'error',
+#                 'message': 'Event ID is required'
+#             }, status=status.HTTP_400_BAD_REQUEST)
+        
+#         # Extract user_id from QR data
+#         user_id = None
+        
+#         if qr_data:
+#             # Check if this is a secure encrypted QR code
+#             if qr_data.startswith('KEA_SECURE:'):
+#                 # Extract the JWT token
+#                 jwt_token = qr_data[len('KEA_SECURE:'):]
+                
+#                 # Get the JWT secret key from settings
+#                 jwt_secret = getattr(settings, "QR_JWT_SECRET", "your-jwt-secret-for-qr-codes")
+                
+#                 try:
+#                     # Decode and verify the JWT token
+#                     payload = jwt.decode(jwt_token, jwt_secret, algorithms=['HS256'])
+                    
+#                     # Extract the encrypted data
+#                     encrypted_b64 = payload.get('data')
+                    
+#                     if not encrypted_b64:
+#                         return Response({
+#                             'status': 'error',
+#                             'message': 'Invalid QR code format: Missing data'
+#                         }, status=status.HTTP_400_BAD_REQUEST)
+                    
+#                     # Get encryption key from settings
+#                     encryption_key = getattr(settings, "QR_ENCRYPTION_KEY", "your-encryption-key-for-qr-codes")
+                    
+#                     try:
+#                         # Decrypt the data
+#                         user_data = decrypt_qr_data(encrypted_b64, encryption_key)
+                        
+#                         # Extract the user_id
+#                         user_id = user_data.get('user_id')
+                        
+#                         if not user_id:
+#                             return Response({
+#                                 'status': 'error',
+#                                 'message': 'Invalid QR code: No user ID found in decrypted data'
+#                             }, status=status.HTTP_400_BAD_REQUEST)
+                        
+#                         # Log the successful decryption
+#                         logger.info(f"Encrypted QR code decrypted successfully. User ID: {user_id}")
+                        
+#                     except Exception as e:
+#                         logger.error(f"Error decrypting QR code data: {str(e)}")
+#                         return Response({
+#                             'status': 'error',
+#                             'message': 'Invalid QR code. Decryption failed.'
+#                         }, status=status.HTTP_400_BAD_REQUEST)
+                    
+#                 except jwt.ExpiredSignatureError:
+#                     return Response({
+#                         'status': 'error',
+#                         'message': 'QR code has expired. Please request a new membership card.'
+#                     }, status=status.HTTP_400_BAD_REQUEST)
+#                 except jwt.InvalidTokenError as e:
+#                     logger.error(f"JWT token verification failed: {str(e)}")
+#                     return Response({
+#                         'status': 'error',
+#                         'message': 'Invalid QR code. Unable to verify authenticity.'
+#                     }, status=status.HTTP_400_BAD_REQUEST)
+            
+#             # Handle other formats (for backward compatibility)
+#             elif qr_data.startswith('KEA_QR|'):
+#                 parsed_data = {}
+#                 parts = qr_data.split('|')
+                
+#                 for part in parts[1:]:  # Skip the KEA_QR prefix
+#                     if '=' in part:
+#                         key, value = part.split('=', 1)
+#                         parsed_data[key] = value
+                
+#                 user_id = parsed_data.get('USER_ID')
+                
+#                 if not user_id:
+#                     return Response({
+#                         'status': 'error',
+#                         'message': 'Invalid QR code format: No user ID found'
+#                     }, status=status.HTTP_400_BAD_REQUEST)
+            
+#             # Handle USER_ID format
+#             elif 'USER_ID:' in qr_data:
+#                 parts = qr_data.split('USER_ID:')
+#                 if len(parts) > 1:
+#                     user_id = parts[1].strip().split()[0]  # Get first word after USER_ID:
+            
+#             # Check for UUID format
+#             elif re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', qr_data.strip(), re.IGNORECASE):
+#                 user_id = qr_data.strip()
+            
+#             # Handle direct input (could be just the user_id)
+#             else:
+#                 user_id = qr_data.strip()
+        
+#         if not user_id:
+#             return Response({
+#                 'status': 'error',
+#                 'message': 'User ID is required'
+#             }, status=status.HTTP_400_BAD_REQUEST)
+        
+#         # Rest of your existing code to verify the user and event registration
+#         try:
+#             # Get the user from QR scan
+#             user = CustomUser.objects.get(user_id=user_id)
+            
+#             # Check if user's membership is valid
+#             if not user.is_active:
+#                 return Response({
+#                     'status': 'membership_inactive',
+#                     'message': f'{user.username} has an inactive membership',
+#                     'user_info': {
+#                         'username': user.username,
+#                         'email': user.email,
+#                         'phone_number': user.phone_number,
+#                         'membership_expiry': user.membership_expiry,
+#                         'is_active': user.is_active
+#                     }
+#                 }, status=status.HTTP_200_OK)
+            
+#             # Check membership expiry
+#             if user.membership_expiry and user.membership_expiry <= timezone.now():
+#                 return Response({
+#                     'status': 'membership_expired',
+#                     'message': f'{user.username} membership has expired',
+#                     'user_info': {
+#                         'username': user.username,
+#                         'email': user.email,
+#                         'phone_number': user.phone_number,
+#                         'membership_expiry': user.membership_expiry,
+#                         'is_active': user.is_active
+#                     }
+#                 }, status=status.HTTP_200_OK)
+            
+#             # Get the event
+#             try:
+#                 event = Event.objects.get(event_id=event_id)
+#             except Event.DoesNotExist:
+#                 return Response({
+#                     'status': 'event_not_found',
+#                     'message': 'Event not found'
+#                 }, status=status.HTTP_404_NOT_FOUND)
+            
+#             # Check if user is registered for this event
+#             try:
+#                 registration = EventRegistration.objects.get(
+#                     event=event,
+#                     registered_by=user,
+#                     is_active=True
+#                 )
+#             except EventRegistration.DoesNotExist:
+#                 return Response({
+#                     'status': 'not_registered',
+#                     'message': f'{user.username} is not registered for this event',
+#                     'user_info': {
+#                         'username': user.username,
+#                         'email': user.email,
+#                         'phone_number': user.phone_number,
+#                         'company_name': user.company_name,
+#                         'designation': user.designation,
+#                         'user_type': user.user_type,
+#                         'membership_expiry': user.membership_expiry
+#                     },
+#                     'event_info': {
+#                         'event_name': event.event_name,
+#                         'event_sub_name': event.event_sub_name,
+#                         'event_time': event.event_time,
+#                         'location': event.location
+#                     }
+#                 }, status=status.HTTP_200_OK)
+            
+#             # Check if already checked in
+#             if hasattr(registration, 'checked_in') and registration.checked_in:
+#                 return Response({
+#                     'status': 'already_checked_in',
+#                     'message': f'{user.username} is already checked in',
+#                     'checked_in_at': getattr(registration, 'checked_in_at', None),
+#                     'user_info': {
+#                         'username': user.username,
+#                         'email': user.email,
+#                         'phone_number': user.phone_number,
+#                         'company_name': user.company_name,
+#                         'designation': user.designation,
+#                         'user_type': user.user_type,
+#                         'fee_paid': registration.fee_paid
+#                     },
+#                     'event_info': {
+#                         'event_name': event.event_name,
+#                         'event_sub_name': event.event_sub_name,
+#                         'location': event.location
+#                     }
+#                 }, status=status.HTTP_200_OK)
+            
+#             # Success - User is registered and ready for check-in
+#             return Response({
+#                 'status': 'ready_for_checkin',
+#                 'message': f'{user.username} is registered and ready for check-in',
+#                 'user_info': {
+#                     'username': user.username,
+#                     'email': user.email,
+#                     'phone_number': user.phone_number,
+#                     'company_name': user.company_name,
+#                     'designation': user.designation,
+#                     'department_of_study': user.department_of_study,
+#                     'year_of_graduation': user.year_of_graduation,
+#                     'user_type': user.user_type,
+#                     'fee_paid': registration.fee_paid,
+#                     'registered_on': registration.registered_on,
+#                     'profile_picture': user.profile_picture.url if user.profile_picture else None
+#                 },
+#                 'event_info': {
+#                     'event_name': event.event_name,
+#                     'event_sub_name': event.event_sub_name,
+#                     'event_time': event.event_time,
+#                     'location': event.location,
+#                     'description': event.description
+#                 },
+#                 'registration_id': str(registration.event_registration_id)
+#             }, status=status.HTTP_200_OK)
+            
+#         except CustomUser.DoesNotExist:
+#             return Response({
+#                 'status': 'user_not_found',
+#                 'message': 'User not found'
+#             }, status=status.HTTP_404_NOT_FOUND)
+#         except Exception as e:
+#             logger.error(f"Error processing event check-in: {str(e)}")
+#             return Response({
+#                 'status': 'error',
+#                 'message': f'An error occurred: {str(e)}'
+#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 
 class ConfirmEventCheckInAPIView(APIView):
     """

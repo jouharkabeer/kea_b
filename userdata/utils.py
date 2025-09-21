@@ -34,124 +34,108 @@ logger = logging.getLogger(__name__)
 
 def generate_user_qr_code(user):
     """
-    Generate a highly secure QR code with encrypted data.
+    Generate a simple, scannable QR code with user data.
+    Uses KEA_QR format that's much shorter and more reliable.
     """
     try:
-        # Get encryption key from settings
-        encryption_key = getattr(settings, "QR_ENCRYPTION_KEY", "your-encryption-key-for-qr-codes")
-        
-        # Derive a key using PBKDF2
-        salt = b'kea_salt_for_qr_codes'  # Keep this constant
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
-        cipher = Fernet(key)
-        
         # Get user data
         user_id = str(user.user_id)
         kea_id = user.kea_id
         
-        # Collect user data to encrypt
-        user_data = {
-            'user_id': user_id,
-            'kea_id': kea_id,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        
-        # Add name if available
+        # Get user name for logging
         first_name = getattr(user, "first_name", "")
         last_name = getattr(user, "last_name", "")
-        if first_name or last_name:
-            user_name = f"{first_name} {last_name}".strip()
-            user_data['name'] = user_name
-        else:
-            user_data['name'] = user.username
-            
-        # Add expiry if available
+        user_name = f"{first_name} {last_name}".strip() if first_name or last_name else user.username
+        
+        logger.info(f"Generating simple QR code for user: {user_name} (KEA ID: {kea_id})")
+        
+        # Create simple QR data format that's easy to scan
+        # Format: KEA_QR|USER_ID=uuid|KEA_ID=kea123|NAME=username
+        qr_data_parts = [
+            'KEA_QR',
+            f'USER_ID={user_id}',
+            f'KEA_ID={kea_id}',
+            f'NAME={user_name[:20]}'  # Limit name length to keep QR small
+        ]
+        
+        # Add expiry if available (optional, keeps QR smaller without it)
         if hasattr(user, 'membership_expiry') and user.membership_expiry:
-            user_data['membership_expiry'] = user.membership_expiry.strftime('%d-%m-%Y')
+            expiry_str = user.membership_expiry.strftime('%Y-%m-%d')
+            qr_data_parts.append(f'EXPIRY={expiry_str}')
         
-        # Convert data to JSON string
-        json_data = json.dumps(user_data)
+        # Join with pipe separator
+        qr_data = '|'.join(qr_data_parts)
         
-        # Encrypt the data
-        encrypted_data = cipher.encrypt(json_data.encode())
+        logger.info(f"QR data: {qr_data}")
+        logger.info(f"QR data length: {len(qr_data)} characters")
         
-        # Convert to base64 for JWT payload
-        encrypted_b64 = base64.urlsafe_b64encode(encrypted_data).decode()
-        
-        # Create a minimal JWT payload with just the encrypted data
-        # This way the JWT itself doesn't reveal any information
-        jwt_payload = {
-            'data': encrypted_b64,
-            'exp': datetime.utcnow() + timedelta(days=365)  # Token expiry (1 year)
-        }
-        
-        # Get JWT secret
-        jwt_secret = getattr(settings, "QR_JWT_SECRET", "your-jwt-secret-for-qr-codes")
-        
-        # Create JWT token
-        token = jwt.encode(jwt_payload, jwt_secret, algorithm='HS256')
-        
-        # Use a consistent prefix to identify this as a secure KEA QR code
-        qr_data = f"KEA_SECURE:{token}"
-        
-        logger.info(f"Generating highly secure encrypted QR code for user: {kea_id}")
-        
-        # Generate QR code with the token
+        # Generate QR code with optimal settings for readability
         qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=8,
-            border=2
+            version=1,  # Start with smallest version
+            error_correction=qrcode.constants.ERROR_CORRECT_L,  # Low error correction for more data
+            box_size=10,  # Larger boxes for better scanning
+            border=4,     # Standard border
         )
         qr.add_data(qr_data)
         qr.make(fit=True)
         
-        # Create QR code image with good contrast
+        logger.info(f"QR code version: {qr.version}")
+        
+        # Create QR code image with high contrast
         img = qr.make_image(
             image_factory=qrcode.image.pil.PilImage,
             fill_color="black",
             back_color="white"
         )
         
-        # Resize to standard size for consistency
-        img = img.resize((200, 200), Image.Resampling.LANCZOS)
+        # Resize to larger size for better scanning (300x300 instead of 200x200)
+        img = img.resize((300, 300), Image.Resampling.LANCZOS)
         
         # Save QR code to buffer
         buffer = BytesIO()
-        img.save(buffer, format="PNG", optimize=True)
+        img.save(buffer, format="PNG", optimize=True, quality=95)
         buffer.seek(0)
         
-        logger.info("Highly secure encrypted QR code generated successfully")
+        logger.info("Simple QR code generated successfully")
         return buffer
         
     except Exception as e:
-        logger.error(f"Error generating secure encrypted QR code: {e}")
-        # Return a simple fallback QR code
+        logger.error(f"Error generating simple QR code: {e}")
+        
+        # Fallback: Ultra-simple QR with just user_id
         try:
-            fallback_img = Image.new('RGB', (200, 200), color='white')
-            # Add some text to indicate it's a fallback
-            draw = ImageDraw.Draw(fallback_img)
-            # Use default font since custom fonts may not be available
-            draw.text((50, 90), "QR", fill='black')
-            draw.text((40, 110), "CODE", fill='black')
+            logger.info("Generating fallback QR with just user_id")
+            fallback_qr_data = f"KEA_QR|USER_ID={str(user.user_id)}"
+            
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=10,
+                border=4
+            )
+            qr.add_data(fallback_qr_data)
+            qr.make(fit=True)
+            
+            img = qr.make_image(fill_color="black", back_color="white")
+            img = img.resize((300, 300), Image.Resampling.LANCZOS)
             
             fallback_buffer = BytesIO()
-            fallback_img.save(fallback_buffer, format="PNG")
+            img.save(fallback_buffer, format="PNG")
             fallback_buffer.seek(0)
             return fallback_buffer
-        except:
-            # Absolute fallback
-            simple_buffer = BytesIO()
-            Image.new('RGB', (200, 200), color='lightgray').save(simple_buffer, format="PNG")
-            simple_buffer.seek(0)
-            return simple_buffer
-        
+            
+        except Exception as fallback_error:
+            logger.error(f"Even fallback QR generation failed: {fallback_error}")
+            
+            # Absolute fallback - empty image
+            empty_img = Image.new('RGB', (300, 300), color='lightgray')
+            draw = ImageDraw.Draw(empty_img)
+            draw.text((100, 140), "QR ERROR", fill='black')
+            
+            empty_buffer = BytesIO()
+            empty_img.save(empty_buffer, format="PNG")
+            empty_buffer.seek(0)
+            return empty_buffer
 def create_user_with_qr(user):
     """
     Create a QR code for the user and save it to their profile.

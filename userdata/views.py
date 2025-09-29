@@ -510,7 +510,35 @@ class RegisterUserView(APIView):
         logger.info(f"Request data: {dict(request.data)}")
         logger.info(f"Files: {dict(request.FILES)}")
         
-        # Validate uploaded files first
+        
+        try:
+            email = request.data.get('email')
+            phone_number = request.data.get('phone_number')
+            existing_user = None
+            if email:
+                existing_user = CustomUser.objects.filter(email=email).first()
+            if not existing_user and phone_number:
+                existing_user = CustomUser.objects.filter(phone_number=phone_number).first()
+            
+            if existing_user:
+              
+                if not existing_user.is_active:
+                    user_serializer = UserSerializer(existing_user, context={'request': request})
+                    return Response({
+                        'message': 'Account already exists but membership/payment is pending. Continue payment.',
+                        'code': 'ACCOUNT_PENDING_PAYMENT',
+                        'user_id': existing_user.user_id,
+                        'user': user_serializer.data
+                    }, status=status.HTTP_200_OK)
+               
+                return Response({
+                    'error': 'User with this email/phone already exists',
+                    'field': 'email' if email and existing_user.email == email else 'phone_number'
+                }, status=status.HTTP_409_CONFLICT)
+        except Exception as precheck_error:
+            logger.error(f"Registration pre-check failed: {precheck_error}")
+        
+   
         if 'profile_picture' in request.FILES:
             profile_pic = request.FILES['profile_picture']
             

@@ -801,7 +801,7 @@ class CreateRazorpayOrderView(APIView):
             logger.info(f"Using Razorpay Key: {settings.RAZORPAY_KEY_ID}")
             
             client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-            amount_in_paise = 200 * 100  # ₹200 in paise
+            amount_in_paise = 1 * 100  # ₹200 in paise
             
             order_data = {
                 "amount": amount_in_paise,
@@ -826,7 +826,7 @@ class CreateRazorpayOrderView(APIView):
             try:
                 payment = Payment.objects.create(
                     user=user,
-                    amount=200,
+                    amount=1,
                     order_id=razorpay_order["id"],
                     status="created"
                 )
